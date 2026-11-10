@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use these surrogate models, prediction scripts, or their outputs in your research, please cite this software."
+type: software
+title: "RevORCHP-SM — Surrogate models for reversible organic Rankine cycle/heat pump systems"
+authors:
+  - family-names: "Roumpedakis"
+    given-names: "Tryfon"
+    orcid: "https://orcid.org/0000-0003-2107-1206"
+    affiliation: "Laboratory of Applied Thermodynamics, School of Mechanical Engineering, National Technical University of Athens"
+version: "1.0.0"
+date-released: "2026-11-10"
+license: Apache-2.0
+url: "https://github.com/trx09009/RevORCHP-SM-1.0.0"
+repository-code: "https://github.com/trx09009/RevORCHP-SM-1.0.0"
+keywords:
+  - reversible organic Rankine cycle
+  - heat pump
+  - surrogate models
+  - thermodynamic modelling
+  - design and off-design
