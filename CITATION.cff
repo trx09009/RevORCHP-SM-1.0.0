@@ -7,7 +7,7 @@ authors:
     given-names: "Tryfon"
     orcid: "https://orcid.org/0000-0003-2107-1206"
     affiliation: "Laboratory of Applied Thermodynamics, School of Mechanical Engineering, National Technical University of Athens"
-version: "1.0.0"
+version: "1.0.1"
 date-released: "2026-11-10"
 license: Apache-2.0
 url: "https://github.com/trx09009/RevORCHP-SM-1.0.0"

@@ -13,6 +13,12 @@ from bundle_io import load_bundle, predict_model
 
 
 SMALL = 1.0e-12
+CORE_OUTPUTS = [
+    "orc_Q_in_W", "orc_Q_rej_W", "orc_P_gross_W", "orc_P_exp_el_W",
+    "orc_P_pump_el_W", "orc_P_acc_fan_W", "orc_P_other_aux_W", "orc_P_net_W",
+    "orc_m_brine_kg_s", "orc_T_brine_out_C", "orc_Q_geo_avail_W",
+    "orc_Q_geo_used_W", "orc_eta_gross", "orc_eta_net",
+]
 
 
 def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -152,11 +158,13 @@ def domain_warnings(row: pd.Series, bounds: dict[str, Any]) -> list[str]:
 
 def enforce_operating_constraints(outputs: pd.DataFrame, inputs: pd.DataFrame,
                                   cp_J_kgK: float = 4200.0,
-                                  generator_efficiency: float = 0.97) -> pd.DataFrame:
+                                  generator_efficiency: float = 0.97,
+                                  pump_motor_efficiency: float = 0.95,
+                                  active: np.ndarray | None = None) -> pd.DataFrame:
     """Reconcile compact predictions with the source and electrical balances.
 
-    Rejected heat retains its fitted ratio to heat input: gross mechanical
-    expander power is not the full working-fluid heat balance.
+    The reference pump relation is shaft=electrical*motor_efficiency.
+    Thus Qrej=Qin+pump_shaft-Pgross. Net power retains its physical sign.
     """
     out = outputs.copy()
     tin = inputs['T_brine_in_C'].to_numpy(dtype=float)
@@ -170,19 +178,74 @@ def enforce_operating_constraints(outputs: pd.DataFrame, inputs: pd.DataFrame,
     for key in ['orc_Q_rej_W','orc_P_gross_W','orc_P_pump_el_W',
                 'orc_P_acc_fan_W','orc_P_other_aux_W']:
         out[key] = np.maximum(out[key].to_numpy(dtype=float),0.0)*factor
+    if 'orc_m_dot_orc_kg_s' in out:
+        out['orc_m_dot_orc_kg_s'] = np.maximum(out['orc_m_dot_orc_kg_s'],0.0)*factor
     out['orc_Q_in_W'] = q
     out['orc_Q_geo_used_W'] = q
     out['orc_Q_geo_avail_W'] = avail
+    pump_shaft = pump_motor_efficiency*out['orc_P_pump_el_W'].to_numpy(dtype=float)
+    out['orc_P_gross_W'] = np.minimum(out['orc_P_gross_W'], q+pump_shaft)
     out['orc_P_exp_el_W'] = generator_efficiency*out['orc_P_gross_W']
-    out['orc_P_net_W'] = np.maximum(out['orc_P_exp_el_W']-out['orc_P_pump_el_W']
-                                   -out['orc_P_acc_fan_W']-out['orc_P_other_aux_W'],0.0)
+    out['orc_P_net_W'] = (out['orc_P_exp_el_W']-out['orc_P_pump_el_W']
+                         -out['orc_P_acc_fan_W']-out['orc_P_other_aux_W'])
+    out['orc_Q_rej_W'] = q+pump_shaft-out['orc_P_gross_W']
+    out['orc_P_pump_shaft_W'] = pump_shaft
     minimum_mass = np.divide(q,cp_J_kgK*delta,out=np.zeros_like(q),where=delta>0)
     mass = np.clip(out['orc_m_brine_kg_s'].to_numpy(dtype=float),minimum_mass,mmax)
     out['orc_m_brine_kg_s'] = mass
     out['orc_T_brine_out_C'] = tin-np.divide(q,cp_J_kgK*mass,out=np.zeros_like(q),where=mass>0)
     out['orc_eta_gross'] = np.divide(out['orc_P_gross_W'],q,out=np.zeros_like(q),where=q>0)
     out['orc_eta_net'] = np.divide(out['orc_P_net_W'],q,out=np.zeros_like(q),where=q>0)
+    if active is not None:
+        inactive = ~np.asarray(active,dtype=bool)
+        extensive = [c for c in out if c.endswith('_W') or c.endswith('_kg_s')]
+        for c in extensive:
+            if c != 'orc_Q_geo_avail_W':
+                out.loc[inactive,c] = 0.
+        out.loc[inactive,'orc_T_brine_out_C'] = tin[inactive]
+        out.loc[inactive,['orc_eta_gross','orc_eta_net']] = 0.
+        for c in out:
+            if c.endswith('_n_rpm'):
+                out.loc[inactive,c] = 0.
+            elif c.endswith('_eta_is') or c.endswith('_eta_vol'):
+                out[c] = np.clip(out[c],1e-8,1.)
+                out.loc[inactive,c] = 0.
+    out['orc_source_balance_residual_W'] = (out['orc_Q_in_W']-cp_J_kgK*out['orc_m_brine_kg_s']
+                                           *(tin-out['orc_T_brine_out_C']))
+    out['orc_electrical_balance_residual_W'] = (out['orc_P_net_W']-(out['orc_P_exp_el_W']
+        -out['orc_P_pump_el_W']-out['orc_P_acc_fan_W']-out['orc_P_other_aux_W']))
+    out['orc_thermal_balance_residual_W'] = (out['orc_Q_in_W']+out['orc_P_pump_shaft_W']
+                                            -out['orc_P_gross_W']-out['orc_Q_rej_W'])
     return out
+
+
+def predict_frames(bundle: dict[str, Any], inputs: pd.DataFrame):
+    """The same batch inference used by the public single-module wrapper."""
+    frame = add_derived_features(inputs).reset_index(drop=True)
+    X = frame[bundle['input_columns']].to_numpy(float)
+    raw = pd.DataFrame(predict_model(bundle['models']['direct_power'],X),
+                       columns=bundle['target_columns'])
+    classifier = bundle['active_classifier']
+    active = np.asarray(classifier.predict(X),dtype=bool)
+    diagnostic_valid = np.ones(len(frame),dtype=bool)
+    for c in raw:
+        if c.endswith('_n_rpm'):
+            diagnostic_valid &= np.isfinite(raw[c].to_numpy()) & (raw[c].to_numpy()>0)
+        elif c.endswith('_eta_is') or c.endswith('_eta_vol'):
+            diagnostic_valid &= np.isfinite(raw[c].to_numpy()) & (raw[c].to_numpy()>0) & (raw[c].to_numpy()<=1)
+    active &= diagnostic_valid
+    active &= (frame.T_brine_in_C.to_numpy()>frame.T_brine_out_min_C.to_numpy()) & (raw.orc_Q_in_W.to_numpy()>0)
+    classes = list(classifier.classes_)
+    probability = (classifier.predict_proba(X)[:,classes.index(1)] if 1 in classes
+                   else np.zeros(len(frame)))
+    deployed = enforce_operating_constraints(raw,frame,
+        cp_J_kgK=float(bundle.get('source_cp_J_kgK',4200.)),
+        generator_efficiency=float(bundle.get('generator_efficiency',.97)),
+        pump_motor_efficiency=float(bundle.get('pump_motor_efficiency',.95)),active=active)
+    deployed['orc_prediction_active'] = active
+    deployed['orc_machine_diagnostics_valid'] = diagnostic_valid
+    deployed['orc_active_probability'] = probability
+    return raw,deployed
 
 
 def resolve_design_expander_stage_count(
@@ -259,6 +322,33 @@ def predict_1mw_orc_performance(
     if p_brine_bar <= 0 or m_brine_max_kg_s <= 0 or T_brine_in_C < T_brine_out_min_C:
         raise ValueError("Invalid ORC pressure, flow or temperature boundary")
     bundle = load_bundle(resolved_model_path)
+
+    if bundle.get('schema_version') == 'corrected_orc_surrogate_v1':
+        if variant not in (None,'direct_power'):
+            raise KeyError("Only direct_power is available in this corrected release")
+        inputs = pd.DataFrame([dict(T_amb_C=float(T_amb_C),T_brine_in_C=float(T_brine_in_C),
+            p_brine_bar=float(p_brine_bar),T_brine_out_min_C=float(T_brine_out_min_C),
+            m_brine_max_kg_s=float(m_brine_max_kg_s))])
+        raw,deployed = predict_frames(bundle,inputs)
+        selected = {k:(bool(v) if isinstance(v,(bool,np.bool_)) else float(v))
+                    for k,v in deployed.iloc[0].to_dict().items()}
+        messages = domain_warnings(inputs.iloc[0],bundle.get('input_bounds_filtered',{}))
+        if not selected['orc_prediction_active']:
+            messages.append('Surrogate feasibility or physical checks indicate inactive ORC operation.')
+        for c in raw:
+            if (c.endswith('_eta_is') or c.endswith('_eta_vol')) and not (0<float(raw.iloc[0][c])<=1):
+                messages.append(f'{c} raw estimate is outside its physical interval; the reported diagnostic is bounded.')
+        if abs(float(raw.iloc[0]['orc_Q_rej_W'])-selected['orc_Q_rej_W'])>1.:
+            messages.append('Rejected heat reconstructed from heat input, pump shaft work and gross expander work.')
+        return dict(selected_variant='direct_power',orc=selected,selected=selected,
+            all_variants={'direct_power':selected},
+            derived_inputs={k:float(v)for k,v in add_derived_features(inputs).iloc[0].items()},
+            model_metadata=dict(model_path=str(resolved_model_path),release_version=bundle['release_version'],
+                expander_stage_count=int(bundle['expander_stage_count']),
+                reference_source_sha256=bundle['reference_source_sha256'],
+                reference_hardware_sha256=bundle['reference_hardware_sha256'],
+                nominal_design=bundle['nominal_design'],
+                physical_projection='source_electric_and_cycle_thermal_balance_v2'),warnings=messages)
 
     selected_variant = variant or bundle.get("selected_variant", "direct_power")
     if selected_variant not in bundle["models"]:

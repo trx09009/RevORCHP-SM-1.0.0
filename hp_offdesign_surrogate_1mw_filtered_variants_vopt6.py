@@ -145,7 +145,10 @@ def compute_variant(bundle: dict[str, Any], X: np.ndarray, q_pred: np.ndarray, v
         pcond = max(float(out["hp_p_cond_bar"]), SMALL)
         pevap = max(float(out["hp_p_evap_bar"]), SMALL)
         pr = pcond / pevap
-        eta = float(eval_eta_poly(bundle["eta_poly"], np.array([pr]))[0])
+        # Corrected models learn the actual map efficiency. Historical bundles
+        # used a pressure-only polynomial, which cannot express flow effects.
+        eta = (float(np.clip(out["hp_eta_is"], 0.05, 1.0))
+               if "hp_eta_is" in out else float(eval_eta_poly(bundle["eta_poly"], np.array([pr]))[0]))
         Wis = max(float(out["hp_W_is_proxy_W"]), SMALL)
         W = Wis / max(eta, SMALL)
         out["hp_pressure_ratio"] = pr
@@ -170,7 +173,9 @@ def compute_variant(bundle: dict[str, Any], X: np.ndarray, q_pred: np.ndarray, v
 
 def enforce_operating_constraints(out, *, heating_load_W, T_brine_in_C,
                                   T_brine_out_min_C, m_brine_max_kg_s,
-                                  cp_J_kgK=4200.0, full_available_flow=False):
+                                  cp_J_kgK=4200.0, full_available_flow=False,
+                                  UA_common_W_K=None, sink_deltaT_K=None,
+                                  sink_approach_K=5.0):
     """Project onto the existing constant-cp source envelope at predicted COP.
 
     This protects feasibility outside stable fitting data; it is not a detailed
@@ -182,8 +187,12 @@ def enforce_operating_constraints(out, *, heating_load_W, T_brine_in_C,
     source = q - w
     delta = max(T_brine_in_C - T_brine_out_min_C, 0.0)
     capacity = cp_J_kgK * m_brine_max_kg_s * delta
+    hx_limit = (float(UA_common_W_K) * sink_deltaT_K /
+                np.log1p(sink_deltaT_K / sink_approach_K)
+                if UA_common_W_K is not None and sink_deltaT_K is not None else float("inf"))
     factor = min(1.0, heating_load_W / q if q > 0 else 1.0,
-                 capacity / source if source > 0 else 1.0)
+                 capacity / source if source > 0 else 1.0,
+                 hx_limit / q if q > 0 else 1.0)
     out["hp_constraint_projection_applied"] = bool(factor < 1.0 - 1e-12)
     out["hp_Q_delivered_W"] = q * factor
     out["hp_W_comp_W"] = w * factor
@@ -203,7 +212,39 @@ def enforce_operating_constraints(out, *, heating_load_W, T_brine_in_C,
     out["hp_unmet_load_W"] = max(heating_load_W - q, 0.0)
     out["hp_load_coverage_frac"] = q / heating_load_W if heating_load_W > 0 else 0.0
     out["hp_source_capacity_limit_W"] = capacity
+    if np.isfinite(hx_limit): out["hp_condenser_capacity_limit_W"] = hx_limit
+    out["hp_T_evap_C"] = out["hp_T_brine_out_C"] - 5.0
     out["hp_energy_balance_residual_W"] = q - source - w
+    return out
+
+
+def reconcile_pressures(out, bundle, *, T_brine_in_C, temperature_lift_K):
+    """Reconstruct saturation pressure at final temperatures without CoolProp.
+
+    Learned pressure-head values remain diagnostics. Outside the embedded
+    saturation range actual pressure fields are omitted, never endpoint-clipped.
+    """
+    out = dict(out)
+    table = bundle.get("saturation_pressure_table")
+    if table is None:
+        return out
+    for field in ["hp_p_cond_bar", "hp_p_evap_bar"]:
+        if field in out:
+            out[field.replace("_bar", "_surrogate_bar")] = out.pop(field)
+    out["hp_T_cond_C"] = T_brine_in_C + temperature_lift_K + float(bundle.get("sink_approach_K", 5.))
+    temps = np.asarray(table["temperature_C"], dtype=float)
+    pressures = np.asarray(table["pressure_bar"], dtype=float)
+    supported = True
+    for target, temperature in [("hp_p_cond_bar", out["hp_T_cond_C"]),
+                                ("hp_p_evap_bar", out["hp_T_evap_C"])]:
+        if temps[0] <= temperature <= temps[-1]:
+            out[target] = float(np.interp(temperature, temps, pressures))
+        else:
+            supported = False
+    out["hp_pressure_state_supported"] = supported
+    out.pop("hp_pressure_ratio", None)
+    if supported:
+        out["hp_pressure_ratio"] = out["hp_p_cond_bar"] / out["hp_p_evap_bar"]
     return out
 
 
@@ -250,29 +291,25 @@ def predict_1mw_hp_performance(
         q_pred = q_pred.reshape(1, -1)
 
     selected = variant or bundle.get("selected_variant", "inverse_cop")
+    classifier = bundle.get("physical_status_classifier")
+    status_supported = True if classifier is None else bool(predict_model(classifier, X)[0])
     def evaluate(name):
         out = compute_variant(bundle, X, q_pred, name)
-        branch_applied = False
-        auxiliary = bundle.get('source_limited_inverse_cop_model')
-        if name == 'inverse_cop' and auxiliary is not None:
-            demand = min(out['hp_Q_delivered_W'], heating_load_W)
-            capacity = float(bundle.get('source_cp_J_kgK',4200.0))*m_brine_max_kg_s*(T_brine_in_C-T_brine_out_min_C)
-            if demand > 0 and demand*(1-out['hp_inverse_COP']) >= capacity:
-                raw = float(np.asarray(predict_model(auxiliary,X)).ravel()[0])
-                inv = float(np.clip(np.expm1(raw) if bundle.get('source_limited_log1p',True) else raw,1e-6,.999999))
-                out['hp_inverse_COP'] = inv
-                out['hp_COP'] = 1/inv
-                out['hp_W_comp_W'] = out['hp_Q_delivered_W']*inv
-                out['hp_Q_source_W'] = out['hp_Q_delivered_W']-out['hp_W_comp_W']
-                branch_applied = True
+        out["hp_Q_delivered_raw_W"] = out["hp_Q_delivered_W"]
+        out["hp_W_comp_raw_W"] = out["hp_W_comp_W"]
+        if not status_supported:
+            out["hp_Q_delivered_W"] = out["hp_W_comp_W"] = 0.0
         out = enforce_operating_constraints(
             out, heating_load_W=heating_load_W,
             T_brine_in_C=T_brine_in_C, T_brine_out_min_C=T_brine_out_min_C,
             m_brine_max_kg_s=m_brine_max_kg_s,
             cp_J_kgK=float(bundle.get("source_cp_J_kgK", 4200.0)),
-            full_available_flow=bundle.get("source_flow_policy") == "full_available")
-        out['hp_source_limited_branch_applied'] = branch_applied
-        return out
+            full_available_flow=bundle.get("source_flow_policy") == "full_available",
+            UA_common_W_K=bundle.get("reference_hardware", {}).get("UA_common_W_K"),
+            sink_deltaT_K=sink_deltaT_K, sink_approach_K=float(bundle.get("sink_approach_K", 5.)))
+        out["hp_physical_status_supported"] = status_supported
+        return reconcile_pressures(out, bundle, T_brine_in_C=T_brine_in_C,
+                                   temperature_lift_K=temperature_lift_K)
 
     result: dict[str, Any] = {
         "surrogate": "hp_offdesign",
@@ -280,6 +317,7 @@ def predict_1mw_hp_performance(
         "inputs": {k: float(v) for k, v in Xdf.iloc[0].to_dict().items()},
         "hp": evaluate(selected),
         "warnings": domain_warnings(Xdf.iloc[0], bundle.get("input_bounds_filtered", {})),
+        "model_metadata": {k: bundle.get(k) for k in ["bundle_version", "reference_source_sha256", "reference_hardware_sha256"]},
     }
 
     if return_all_variants:
@@ -289,9 +327,13 @@ def predict_1mw_hp_performance(
         }
 
     if result["hp"]["hp_constraint_projection_applied"]:
-        result["warnings"].append("HP output projected to requested-load/source-capacity limits at predicted COP; detailed-simulation accuracy outside stable fitting regime is limited.")
-    if result['hp']['hp_source_limited_branch_applied']:
-        result['warnings'].append('Source-capacity inverse-COP correction applied; additional equipment-capacity limits remain approximate.')
+        result["warnings"].append("HP output projected to requested-load, condenser and source-capacity limits at predictedCOP.")
+    if heating_load_W < float(bundle.get("minimum_fit_load_W", 200000.)):
+        result["warnings"].append("Requested load is below the20% fitting regime; this is extrapolation.")
+    if not status_supported:
+        result["warnings"].append("Input is classified outside the supported active physical regime; heat and power are returned as zero.")
+    if result["hp"].get("hp_pressure_state_supported") is False:
+        result["warnings"].append("Final temperature is outside the supported saturation-pressure range; unsupported actual pressure fields are omitted. No endpoint clipping is applied.")
     return result
 
 

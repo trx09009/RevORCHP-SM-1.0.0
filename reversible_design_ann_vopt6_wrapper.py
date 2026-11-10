@@ -25,12 +25,21 @@ EXTENSIVE_OUTPUTS = {
     "hp_unmet_load_W",
     "hp_m_dot_ref_kg_s",
     "hp_V_s_comp_m3rev",
+    "hp_energy_balance_residual_W",
+    "source_energy_residual_W",
+    "orc_electrical_balance_residual_W",
     "orc_Q_in_W",
     "orc_P_gross_W",
+    "orc_P_exp_el_W",
+    "orc_P_pump_el_W",
+    "orc_P_acc_fan_W",
+    "orc_P_other_aux_W",
     "orc_P_net_W",
     "orc_Q_rej_W",
     "orc_m_dot_orc_kg_s",
     "orc_V_s_exp_m3rev",
+    "orc_V_s_exp_stage1_m3rev",
+    "orc_V_s_exp_stage2_m3rev",
     "common_hex_area_req_m2",
     "common_hex_UA_required_W_K",
     "common_hex_orc_area_req_m2",
@@ -103,7 +112,8 @@ class ReversibleDesignANN:
         if abs(actual_split_flow - self.nominal_flow) > 1.0e-9:
             warnings.append(
                 "The ANN sizes a nominal 10 kg/s module. Actual performance at the equal split "
-                "flow must be evaluated with the off-design surrogate."
+                "flow requires an off-design model for this exact sized hardware. The supplied "
+                "off-design bundles describe fixed nominal 1 MW hardware."
             )
 
         return {
@@ -216,7 +226,8 @@ class ReversibleDesignANN:
         if abs(actual_split_flow - self.nominal_flow) > 1.0e-9:
             warnings.append(
                 "The installed design is based on nominal 10 kg/s modules. Actual ORC output at "
-                "the equal split flow must be evaluated with the ORC off-design surrogate."
+                "the equal split flow requires an off-design model for this exact sized hardware. "
+                "The supplied off-design bundles describe fixed nominal 1 MW hardware."
             )
 
         ranked = search.loc[feasible].nlargest(min(10, int(feasible.sum())), objective)
