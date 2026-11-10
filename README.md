@@ -2,7 +2,7 @@
 
 Surrogate models for reversible organic Rankine cycle and heat-pump systems using R1234ze(E).
 
-## Corrected release 1.0.1
+## Corrected release 1.0.2
 
 This release replaces the earlier models after correcting compressor/expander displacement sizing and independently sizing each stage of the two-stage expander. The analytical model was numerically checked, nominal hardware was recreated, every training label was regenerated, and all four surrogate bundles were retrained. The failed-search value of 204800 m³/rev is absent from the corrected hardware and learned geometry.
 
@@ -95,4 +95,4 @@ These scores measure agreement with the corrected thermodynamic simulator. Numer
 
 ## Licence and citation
 
-Apache-2.0; see LICENSE and CITATION.cff. Cite version 1.0.1 for these corrected models.
+Apache-2.0; see LICENSE and CITATION.cff. Cite version 1.0.2 for these corrected models.

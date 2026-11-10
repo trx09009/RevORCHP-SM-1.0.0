@@ -7,11 +7,15 @@ authors:
     given-names: "Tryfon"
     orcid: "https://orcid.org/0000-0003-2107-1206"
     affiliation: "Laboratory of Applied Thermodynamics, School of Mechanical Engineering, National Technical University of Athens"
-version: "1.0.1"
+  - family-names: "Nikoglou"
+    given-names: "Andreas"
+  - family-names: "Karellas"
+    given-names: "Sotirios"
+version: "1.0.2"
 date-released: "2026-11-10"
 license: Apache-2.0
-url: "https://github.com/trx09009/RevORCHP-SM-1.0.0"
-repository-code: "https://github.com/trx09009/RevORCHP-SM-1.0.0"
+url: "https://github.com/trx09009/RevORCHP-SM-1.0.2"
+repository-code: "https://github.com/trx09009/RevORCHP-SM-1.0.2"
 keywords:
   - reversible organic Rankine cycle
   - heat pump
