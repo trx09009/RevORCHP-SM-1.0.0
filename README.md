@@ -4,9 +4,9 @@ Surrogate models for reversible organic Rankine cycle and heat-pump systems usin
 
 ## Corrected release 1.0.2
 
-This release replaces the earlier models after correcting compressor/expander displacement sizing and independently sizing each stage of the two-stage expander. The analytical model was numerically checked, nominal hardware was recreated, every training label was regenerated, and all four surrogate bundles were retrained. The failed-search value of 204800 m³/rev is absent from the corrected hardware and learned geometry.
+This release replaces the earlier models after correcting compressor/expander displacement sizing and independently sizing each stage of the two-stage expander.
 
-All nominal modules use 10 kg/s brine flow and a 1 MW HP design target. The one-stage ORC reference has mean ambient 9.7°C and design pressure ratio 6.4642; the two-stage reference uses −4°C and ratio 10.1857. Each nominal compressor and expander stage is sized at 1500 rpm. The HP nominal compressor displacement is 0.0103406 m³/rev; the colder two-stage reference has 0.0109927 m³/rev.
+All nominal modules use 10 kg/s brine flow and a 1 MW HP design target. The one-stage ORC reference has mean ambient 9.7°C and design pressure ratio 6.4642; the two-stage reference uses −4°C and total (two-stage) ratio 10.1857. Each nominal compressor and expander stage is sized at 1500 rpm. 
 
 The design surrogate sizes variable geometry. The off-design surrogates describe their own fixed nominal hardware. An arbitrary design-surrogate geometry cannot be passed into the fixed-hardware off-design bundles. Identical modules may be aggregated by summing heat, power and mass flows; temperatures, pressures and efficiencies remain intensive.
 
